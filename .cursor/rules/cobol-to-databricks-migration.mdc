@@ -1,0 +1,49 @@
+---
+description: COBOL to PySpark/Databricks migration for healthcare payer analytics. Widget usage, createDataFrame rules, catalog config, hybrid SQL/PySpark, and gotchas.
+alwaysApply: true
+---
+
+# COBOL to Databricks Migration
+
+When converting COBOL to PySpark/SQL notebooks: preserve business logic exactly; use catalog variables; follow the critical output and hybrid rules below.
+
+## Critical output rules
+
+**1. Widget parameters — read before use**
+- Extract widget values at the top of the notebook, then use the variables.
+- Wrong: using `analysis_period` in code without having called `dbutils.widgets.get("analysis_period")` (NameError).
+- Right: `analysis_period = dbutils.widgets.get("analysis_period")` then use `analysis_period` in `createDataFrame` or elsewhere.
+
+**2. createDataFrame — Python types only, no Column expressions**
+- `spark.createDataFrame()` requires Python literals (int, float, str, datetime), not PySpark Column expressions.
+- Wrong: `F.current_timestamp()` inside a row tuple → CANNOT_DETERMINE_TYPE.
+- Right: use `datetime.datetime.now()` for timestamps, `datetime.date.today()` for dates. Always pass a `schema` when constructing from row tuples.
+
+
+## Hybrid SQL vs PySpark
+
+- Use **spark.sql()** for: simple SELECT with explicit columns (no `*`), WHERE filtering, simple GROUP BY, JOINs without column transforms, creating temp views.
+- Use **df.withColumn()** for: adding or transforming columns, SELECT * plus new columns (avoids COLUMN_ALREADY_EXISTS), CASE WHEN that adds columns.
+- Required imports: `from pyspark.sql import functions as F` and `from pyspark.sql import Window`.
+
+## Key gotchas
+
+- **COBOL SPACES → NULL**: Use `F.col("field").isNull()` or empty string checks; do not compare to literal `"SPACES"`. Use `F.lit(None)` or `""` for “move spaces”.
+- **PIC 9(n)V99 / money**: Use `DecimalType(precision, scale)` and `.cast(DecimalType(...))`; avoid float/double for money.
+- **Naming**: snake_case and `_df` suffix for DataFrames. No COBOL-style hyphens.
+
+## COBOL → PySpark quick reference
+
+- DATA DIVISION / PIC → `StructType` + `StructField` with `LongType`, `StringType`, `DateType`, `DecimalType` as appropriate (PIC 9(8) date → `DateType` or parse with `to_date(..., "yyyyMMdd")`).
+- PERFORM / sequential steps → chained DataFrame ops or separate `df = ...` steps.
+- IF/EVALUATE → `F.when(...).otherwise(...)`.
+- COMPUTE / ADD / SUBTRACT → `df.withColumn("col", F.col("a") + F.col("b"))` etc.
+- READ file → `spark.table(...)` or `spark.read` with schema. WRITE → `df.write.mode("overwrite").saveAsTable(...)` or `append`. MERGE → `DeltaTable.forName(...).merge(...).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()`.
+- SORT → `df.orderBy(...)`. STRING/UNSTRING → `F.concat_ws`, `F.split`, `F.regexp_extract`. INSPECT REPLACING → `F.regexp_replace`.
+
+
+## Catalog and config
+
+- Use widgets for catalogs: `dbutils.widgets.text("source_catalog", "jai_payer_dev")`, `dbutils.widgets.text("target_catalog", "jai_payer_analyst_dev")`, then `SOURCE_CATALOG = dbutils.widgets.get("source_catalog")`, `TARGET_CATALOG = dbutils.widgets.get("target_catalog")`.
+- Always use variables: `spark.table(f"{SOURCE_CATALOG}.analytics_gold.members")`, `df.write.saveAsTable(f"{TARGET_CATALOG}.hedis_reports.bcs_summary")`. Never hardcode catalog names.
+- Three-level namespace only: `catalog.schema.table`.
